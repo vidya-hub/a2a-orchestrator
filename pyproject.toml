@@ -12,11 +12,14 @@ dependencies = [
     "httpx>=0.27.0",
     "rich>=13.0.0",
     "python-dotenv>=1.0.0",
-    "click>=8.0.0",
     "uvicorn>=0.30.0",
 ]
 
 [project.scripts]
-a2a-research = "a2a_demo.agents.research:main"
-a2a-writer = "a2a_demo.agents.writer:main"
-a2a-client = "a2a_demo.client:main"
+a2a-research = "a2a_demo.cli.research:run"
+a2a-writer = "a2a_demo.cli.writer:run"
+a2a-routing = "a2a_demo.cli.routing:run"
+a2a-send = "a2a_demo.cli.send:run"
+
+[tool.setuptools.packages.find]
+include = ["a2a_demo*"]

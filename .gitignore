@@ -1,0 +1,10 @@
+.env
+a2a_demo.egg-info/
+a2a_demo/agents/__pycache__/
+a2a_demo/core/__pycache__/
+a2a_demo/__pycache__/
+a2a_demo/mcp/__pycache__/
+output/
+a2a_demo/cli/__pycache__/
+tmux-start.sh
+.tmux.conf

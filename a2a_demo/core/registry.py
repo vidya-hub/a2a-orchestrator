@@ -102,6 +102,11 @@ class AgentRegistry:
         return "\n".join(lines)
 
     async def send_message(self, agent_name: str, task: str) -> str:
+        return await self.send_message_with_session(agent_name, task, None)
+
+    async def send_message_with_session(
+        self, agent_name: str, task: str, session_id: str | None = None
+    ) -> str:
         agent = self._agents.get(agent_name)
         if not agent:
             available = self.list_agents()
@@ -117,6 +122,7 @@ class AgentRegistry:
                         role=Role.user,
                         parts=[Part(root=TextPart(text=task))],
                         message_id=str(uuid.uuid4()),
+                        context_id=session_id,
                     )
                 ),
             )

@@ -22,18 +22,18 @@ from ..core.registry import AgentRegistry, get_registry
 logger = logging.getLogger(__name__)
 
 
-ROUTING_SYSTEM_PROMPT = """You are a task orchestrator that routes requests to specialized agents.
+ROUTING_SYSTEM_PROMPT = """You are a task orchestrator that delegates work to specialized agents.
 
-You have access to a send_message tool that lets you delegate tasks to remote agents.
-Each agent has specific capabilities - choose the right agent for each task.
+You have a send_message tool to communicate with remote agents. Use it to delegate tasks based on each agent's capabilities.
 
 {agents_summary}
 
-Guidelines:
-- For web search/research tasks, use the Research Agent
-- For file operations (read/write/list files), use the Writer Agent
-- For complex tasks requiring multiple capabilities, break them down and use multiple agents
-- Always report the final results back to the user"""
+Workflow:
+1. Analyze the user's request
+2. Identify which agent(s) can handle it based on their skills
+3. Use send_message to delegate tasks to the appropriate agent(s)
+4. For multi-step tasks, coordinate between agents as needed
+5. Compile and return the final result to the user"""
 
 
 class RoutingAgent:
@@ -43,6 +43,8 @@ class RoutingAgent:
         self.model_name = model_name
         self._registry: AgentRegistry | None = None
         self._initialized = False
+        self._memory = MemorySaver()
+        self._graph = None
 
     def get_agent_card(self, host: str = "localhost", port: int = 8000) -> AgentCard:
         return AgentCard(
@@ -94,21 +96,21 @@ class RoutingAgent:
         if not self._initialized or not self._registry:
             raise RuntimeError("RoutingAgent not initialized. Call setup() first.")
 
-        agents_summary = self._registry.get_agents_summary()
-        system_prompt = ROUTING_SYSTEM_PROMPT.format(agents_summary=agents_summary)
-
-        tools = [self._create_send_message_tool()]
-        model = ChatGoogleGenerativeAI(model=self.model_name)
-        graph = create_react_agent(
-            model,
-            tools=tools,
-            checkpointer=MemorySaver(),
-            prompt=system_prompt,
-        )
+        if self._graph is None:
+            agents_summary = self._registry.get_agents_summary()
+            system_prompt = ROUTING_SYSTEM_PROMPT.format(agents_summary=agents_summary)
+            tools = [self._create_send_message_tool()]
+            model = ChatGoogleGenerativeAI(model=self.model_name)
+            self._graph = create_react_agent(
+                model,
+                tools=tools,
+                checkpointer=self._memory,
+                prompt=system_prompt,
+            )
 
         config = {"configurable": {"thread_id": context_id}}
 
-        async for event in graph.astream(
+        async for event in self._graph.astream(
             {"messages": [HumanMessage(content=query)]}, config=config
         ):
             if "agent" in event:

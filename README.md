@@ -1,62 +1,40 @@
 # A2A Protocol Demo - Agent to Agent Communication
 
-A production-grade demonstration of Google's Agent-to-Agent (A2A) protocol implementing the **Host Agent Pattern** — a central orchestrator delegates tasks to specialized agents.
-
-## What's New (v2.0)
-
-This project was refactored to follow [Google's official A2A multi-agent patterns](https://github.com/a2aproject/a2a-samples):
-
-| Before (v1) | After (v2) |
-|-------------|------------|
-| Peer-to-peer delegation | Host agent orchestration |
-| Every agent had `delegate_to_agent` tool | Only RoutingAgent delegates |
-| Specialized agents knew about other agents | Specialized agents are pure domain experts |
-| Delegation logic in system prompts | Clean separation of concerns |
-
-### Why the Change?
-
-The original peer-to-peer approach had issues:
-1. **Coupling**: Every agent needed to know about every other agent
-2. **Confusion**: LLMs often didn't use delegation tools correctly
-3. **Scaling**: Adding new agents required updating all existing agents
-
-The **Host Agent Pattern** (used by Google's official samples) solves these:
-1. **Single orchestrator** (RoutingAgent) handles all routing decisions
-2. **Specialized agents** focus purely on their domain
-3. **Clean interfaces** — agents communicate only through A2A protocol
+A production-grade demonstration of Google's [Agent-to-Agent (A2A) protocol](https://github.com/a2aproject/a2a-samples) implementing the **Host Agent Pattern** — a central orchestrator delegates tasks to specialized agents.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          External Client                                 │
-│                (curl, httpie, or any HTTP client)                       │
-└─────────────────────────────┬───────────────────────────────────────────┘
-                              │ A2A Protocol (JSON-RPC/HTTP)
-                              ▼
-                    ┌─────────────────────┐
-                    │   Routing Agent     │ ← Orchestrator (Host Agent)
-                    │   Port: 8000        │
-                    │                     │
-                    │   Tools:            │
-                    │   - send_message    │ ← Single delegation tool
-                    └──────────┬──────────┘
-                               │ A2A Protocol
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-┌─────────────────────────┐       ┌─────────────────────────┐
-│   Research Agent        │       │   Writer Agent          │
-│   Port: 8001            │       │   Port: 8002            │
-│                         │       │                         │
-│   Tools (MCP only):     │       │   Tools (MCP only):     │
-│   - web_search          │       │   - read_file           │
-│   - fetch_content       │       │   - write_file          │
-│                         │       │   - edit_file           │
-│   ┌───────────────┐     │       │   ┌───────────────┐     │
-│   │ DuckDuckGo    │     │       │   │ Filesystem    │     │
-│   │ MCP Server    │     │       │   │ MCP Server    │     │
-│   └───────────────┘     │       └───────────────────┘     │
-└─────────────────────────┘       └─────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Client["External Client"]
+        CLI["a2a-send CLI<br/>--session for memory"]
+    end
+
+    CLI -->|"A2A Protocol (JSON-RPC/HTTP)<br/>+ context_id"| Routing
+
+    subgraph Routing["Routing Agent :8000"]
+        direction TB
+        Router["Orchestrator (Host Agent)<br/><br/>Tools:<br/>• send_message"]
+        Memory["MemorySaver<br/>(per session)"]
+        Router --- Memory
+    end
+
+    Routing -->|"A2A Protocol"| Research
+    Routing -->|"A2A Protocol"| Writer
+
+    subgraph Research["Research Agent :8001"]
+        direction TB
+        ResearchTools["Tools (MCP only):<br/>• web_search<br/>• fetch_content"]
+        DDG["DuckDuckGo<br/>MCP Server"]
+        ResearchTools --- DDG
+    end
+
+    subgraph Writer["Writer Agent :8002"]
+        direction TB
+        WriterTools["Tools (MCP only):<br/>• read_file<br/>• write_file<br/>• edit_file"]
+        FS["Filesystem<br/>MCP Server"]
+        WriterTools --- FS
+    end
 ```
 
 ### Key Design Principles
@@ -84,26 +62,31 @@ echo "GOOGLE_API_KEY=your-key-here" > .env
 
 ## Quick Start
 
-### 1. Start All Agents
+### Start the Agents (3 separate terminals)
 
+**Terminal 1 - Research Agent:**
 ```bash
-python run.py run --output-dir ./output
+a2a-research --port 8001
 ```
 
-This starts:
-- **Routing Agent** on `http://localhost:8000` (orchestrator - send all requests here)
-- **Research Agent** on `http://localhost:8001` (web search capabilities)
-- **Writer Agent** on `http://localhost:8002` (file operations)
+**Terminal 2 - Writer Agent:**
+```bash
+a2a-writer --port 8002 --allowed-dir .
+```
 
-### 2. Send a Request
+**Terminal 3 - Routing Agent (start after the others are running):**
+```bash
+a2a-routing --port 8000 --agents http://localhost:8001 http://localhost:8002
+```
 
-All requests go to the **Routing Agent** (port 8000):
+### Send a Request
 
 ```bash
-# Using the CLI helper
-python run.py send "Search for Python 3.13 features and save a summary to /full/path/to/output/python_features.txt" --port 8000
+a2a-send "Search for Python 3.13 features and save a summary to python_features.txt" --url http://localhost:8000
+```
 
-# Or using curl directly
+Or use curl directly:
+```bash
 curl -X POST http://localhost:8000/ \
   -H "Content-Type: application/json" \
   -d '{
@@ -123,7 +106,7 @@ curl -X POST http://localhost:8000/ \
 ### 3. Check Results
 
 ```bash
-cat ./output/python_features.txt
+cat python_features.txt
 ```
 
 ## How It Works
@@ -204,17 +187,17 @@ curl http://localhost:8002/.well-known/agent-card.json
 
 ## Example Tasks
 
-### Multi-Agent Tasks (via Routing Agent - Port 8000)
+### Multi-Agent Tasks (via Routing Agent)
 
 ```bash
 # Search and save to file
-python run.py send "Search for latest AI news and save a summary to ai_news.txt" --port 8000
+a2a-send "Search for latest AI news and save a summary to ai_news.txt" --url http://localhost:8000
 
 # Research and document
-python run.py send "Find Docker best practices and write them to docker_tips.txt" --port 8000
+a2a-send "Find Docker best practices and write them to docker_tips.txt" --url http://localhost:8000
 
 # Complex task with multiple agents
-python run.py send "Search for Python asyncio tutorials, summarize the key points, and save to asyncio_guide.txt" --port 8000
+a2a-send "Search for Python asyncio tutorials, summarize the key points, and save to asyncio_guide.txt" --url http://localhost:8000
 ```
 
 ### Direct Agent Access (for testing only)
@@ -223,42 +206,108 @@ You can access specialized agents directly, but they won't delegate:
 
 ```bash
 # Research Agent directly (web search only)
-python run.py send "Search for Rust programming tips" --port 8001
+a2a-send "Search for Rust programming tips" --url http://localhost:8001
 
 # Writer Agent directly (file operations only)
-python run.py send "Write 'Hello World' to hello.txt" --port 8002
+a2a-send "Write 'Hello World' to hello.txt" --url http://localhost:8002
 ```
 
-**Note:** Direct access bypasses orchestration — always use port 8000 for real tasks.
+**Note:** Direct access bypasses orchestration — always use the Routing Agent for real tasks.
 
 ## CLI Reference
 
+### a2a-send - Interactive Client
+
+The `a2a-send` command supports multiple modes for interacting with agents:
+
 ```bash
-# Start all agents
-python run.py run --output-dir ./output
+# Single message (auto-generates session ID)
+a2a-send "Search for Python 3.13 features" --url http://localhost:8000
 
-# Send a message to Routing Agent
-python run.py send "Your task" --port 8000
+# Interactive chat mode (no message = enters interactive mode)
+a2a-send --url http://localhost:8000
 
-# Custom configuration
-python run.py run \
-  --host 0.0.0.0 \
-  --routing-port 8000 \
-  --research-port 8001 \
-  --writer-port 8002 \
-  --output-dir /custom/path
+# Explicit interactive mode
+a2a-send -i --url http://localhost:8000
+
+# Continue a previous conversation (session continuity)
+a2a-send "What did you find?" --session abc-123 --url http://localhost:8000
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `message` | Message to send (optional - prompts if not provided) |
+| `--url` | Agent URL (default: `http://localhost:8000`) |
+| `--session` | Session ID for conversation continuity |
+| `-i, --interactive` | Force interactive chat mode |
+
+**Session Continuity:**
+
+The agent remembers context within a session. Use `--session` to continue conversations:
+
+```bash
+# First message - note the session ID in output
+$ a2a-send "My name is Alice" --url http://localhost:8000
+Response: Nice to meet you, Alice!
+(Session ID: abc-123 - use --session abc-123 to continue this conversation)
+
+# Continue the conversation
+$ a2a-send "What's my name?" --session abc-123 --url http://localhost:8000
+Response: Your name is Alice, as you told me earlier.
+```
+
+**Interactive Mode:**
+
+When no message is provided, or with `-i`, the CLI enters interactive chat mode:
+
+```
+$ a2a-send --url http://localhost:8000
+
+Connecting to http://localhost:8000...
+Connected to: Routing Agent
+Session ID: def-456
+Type 'exit' or 'quit' to end the session.
+
+You: Search for Rust features
+Agent: I found information about Rust...
+
+You: Save that to rust_features.txt
+Agent: Done! I've saved the Rust features to rust_features.txt.
+
+You: exit
+Goodbye!
+```
+
+### Agent Commands
+
+```bash
+# Research Agent
+a2a-research --host localhost --port 8001 --mcp-command "uvx ddgs-mcp"
+
+# Writer Agent
+a2a-writer --host localhost --port 8002 --allowed-dir . --mcp-command "npx -y @modelcontextprotocol/server-filesystem"
+
+# Routing Agent (discovers other agents)
+a2a-routing --host localhost --port 8000 --agents http://localhost:8001 http://localhost:8002
 ```
 
 ## Project Structure
 
 ```
 a2a-demo/
-├── run.py                      # Main entry point
 ├── pyproject.toml              # Dependencies
 ├── .env                        # GOOGLE_API_KEY
-├── output/                     # Writer Agent output directory
+├── tmux-start.sh               # Tmux session launcher
+├── .tmux.conf                  # Tmux configuration (optional)
 └── a2a_demo/
     ├── __init__.py
+    ├── cli/                    # CLI entry points
+    │   ├── research.py         # a2a-research command
+    │   ├── writer.py           # a2a-writer command
+    │   ├── routing.py          # a2a-routing command
+    │   └── send.py             # a2a-send command
     ├── core/
     │   └── registry.py         # A2ACardResolver + A2AClient wrapper
     ├── mcp/
@@ -320,25 +369,59 @@ async def send_message(agent_name: str, task: str) -> str:
     """
 ```
 
+### Conversation Memory
+
+Agents maintain conversation context using LangGraph's `MemorySaver` with A2A's `context_id`:
+
+```python
+from a2a.types import Message
+
+message = Message(
+    message_id="unique-id",
+    role=Role.user,
+    parts=[Part(root=TextPart(text="Your message"))],
+    context_id="session-123",  # Links messages in same conversation
+)
+```
+
+**How it works:**
+
+1. Client sends message with `context_id` (session ID)
+2. A2A server passes `context_id` to the agent's `process()` method
+3. Agent uses `context_id` as LangGraph's `thread_id` for memory lookup
+4. `MemorySaver` retrieves/stores conversation history per thread
+
+```
+Session "abc-123":
+  User: "My name is Alice"
+  Agent: "Nice to meet you!"
+  User: "What's my name?"
+  Agent: "Your name is Alice"  ← Remembers from same session
+
+Session "def-456":
+  User: "What's my name?"
+  Agent: "I don't know your name"  ← Different session, no memory
+```
+
 ## Sequence Diagrams
 
 ### Startup Sequence
 
 ```mermaid
 sequenceDiagram
-    participant Main as run.py
+    participant CLI as Terminal Commands
     participant RA as Routing Agent
     participant ResA as Research Agent
     participant WA as Writer Agent
 
-    Note over Main: Phase 1: Start Specialized Agents
-    Main->>ResA: Start on :8001 (with DuckDuckGo MCP)
-    Main->>WA: Start on :8002 (with Filesystem MCP)
+    Note over CLI: Phase 1: Start Specialized Agents
+    CLI->>ResA: a2a-research --port 8001
+    CLI->>WA: a2a-writer --port 8002 --allowed-dir .
 
-    Note over Main: Phase 2: Start Routing Agent
-    Main->>RA: Start on :8000
+    Note over CLI: Phase 2: Start Routing Agent
+    CLI->>RA: a2a-routing --port 8000 --agents ...
 
-    Note over Main: Phase 3: Agent Discovery
+    Note over RA: Phase 3: Agent Discovery
     RA->>ResA: GET /.well-known/agent-card.json
     ResA-->>RA: AgentCard (name, skills, url)
     RA->>WA: GET /.well-known/agent-card.json
@@ -351,15 +434,19 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Client as HTTP Client
+    participant Client as a2a-send CLI
     participant RA as Routing Agent<br/>:8000
+    participant Mem as MemorySaver
     participant LLM as Gemini LLM
     participant ResA as Research Agent<br/>:8001
     participant WA as Writer Agent<br/>:8002
 
-    Client->>RA: "Search for AI news and save to file"
+    Client->>RA: message + context_id="session-123"
     
-    RA->>LLM: Process with send_message tool
+    RA->>Mem: Load history for thread_id="session-123"
+    Mem-->>RA: Previous conversation (if any)
+    
+    RA->>LLM: Process with send_message tool + history
     LLM-->>RA: Call send_message("Research Agent", "search AI news")
     
     RA->>ResA: A2A message/send
@@ -371,89 +458,38 @@ sequenceDiagram
     WA-->>RA: "File saved successfully"
     
     LLM-->>RA: Final response
+    RA->>Mem: Save conversation to thread_id="session-123"
     RA-->>Client: "Found AI news and saved to file"
 ```
 
-## Architecture Comparison
+### Session Memory Flow
 
-### Old (v1): Peer-to-Peer Delegation
+```mermaid
+sequenceDiagram
+    participant User as User
+    participant CLI as a2a-send
+    participant RA as Routing Agent
+    participant Mem as MemorySaver
 
+    Note over User,Mem: First Request (new session)
+    User->>CLI: a2a-send "My name is Alice"
+    CLI->>RA: message + context_id="abc-123"
+    RA->>Mem: Load thread "abc-123" (empty)
+    RA->>RA: Process message
+    RA->>Mem: Save: [User: "My name is Alice", Agent: "Nice to meet you!"]
+    RA-->>CLI: "Nice to meet you, Alice!"
+    CLI-->>User: Response + Session ID: abc-123
+
+    Note over User,Mem: Second Request (same session)
+    User->>CLI: a2a-send "What's my name?" --session abc-123
+    CLI->>RA: message + context_id="abc-123"
+    RA->>Mem: Load thread "abc-123"
+    Mem-->>RA: [User: "My name is Alice", Agent: "Nice to meet you!"]
+    RA->>RA: Process with history context
+    RA->>Mem: Append new messages
+    RA-->>CLI: "Your name is Alice"
+    CLI-->>User: Response
 ```
-┌─────────────┐     delegate     ┌─────────────┐
-│  Research   │◄────────────────►│   Writer    │
-│   Agent     │                  │   Agent     │
-│             │                  │             │
-│  Tools:     │                  │  Tools:     │
-│  - search   │                  │  - read     │
-│  - delegate │                  │  - write    │
-│  - list     │                  │  - delegate │
-└─────────────┘                  └─────────────┘
-     ▲                                ▲
-     │         Direct access          │
-     └────────────────────────────────┘
-                   User
-```
-
-**Problems:**
-- Every agent needed delegation logic
-- Agents had to know about each other
-- LLM often failed to use delegation correctly
-- Hard to add new agents
-
-### New (v2): Host Agent Pattern
-
-```
-                    ┌─────────────┐
-                    │   Routing   │ ← Single entry point
-                    │   Agent     │
-                    │             │
-                    │  Tools:     │
-                    │  - send_msg │
-                    └──────┬──────┘
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-       ┌─────────────┐          ┌─────────────┐
-       │  Research   │          │   Writer    │
-       │   Agent     │          │   Agent     │
-       │             │          │             │
-       │  Tools:     │          │  Tools:     │
-       │  - search   │          │  - read     │
-       │  (MCP only) │          │  - write    │
-       └─────────────┘          └─────────────┘
-```
-
-**Benefits:**
-- Clear separation of concerns
-- Specialized agents stay focused
-- Easy to add new agents
-- RoutingAgent handles all orchestration
-
-## Troubleshooting
-
-### "Agent not found" Error
-
-Make sure specialized agents are fully started before RoutingAgent discovers them:
-```bash
-# Check agent cards are accessible
-curl http://localhost:8001/.well-known/agent-card.json
-curl http://localhost:8002/.well-known/agent-card.json
-```
-
-### File Write Fails
-
-Writer Agent requires **full paths** within the allowed directory:
-```bash
-# Wrong (relative path)
-"save to notes.txt"
-
-# Right (full path)
-"save to /Users/you/a2a-demo/output/notes.txt"
-```
-
-### Agent Doesn't Delegate
-
-If using specialized agents directly (not via RoutingAgent), they won't delegate to other agents — they only have their MCP tools. Always send complex multi-step tasks to the **Routing Agent** (port 8000).
 
 ## License
 

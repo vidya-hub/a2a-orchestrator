@@ -44,6 +44,8 @@ class BaseAgent(ABC):
         self._mcp_connection: MCPConnection | None = None
         self._mcp_manager: MCPManager | None = None
         self._tools: list[StructuredTool] | None = None
+        self._memory = MemorySaver()
+        self._graph = None
 
     def get_agent_card(self, host: str = "localhost", port: int = 8000) -> AgentCard:
         return AgentCard(
@@ -77,17 +79,18 @@ class BaseAgent(ABC):
         if not self._tools:
             raise RuntimeError("Agent not initialized. Call setup() first.")
 
-        model = ChatGoogleGenerativeAI(model=self.model_name)
-        graph = create_react_agent(
-            model,
-            tools=self._tools,
-            checkpointer=MemorySaver(),
-            prompt=self.system_prompt,
-        )
+        if self._graph is None:
+            model = ChatGoogleGenerativeAI(model=self.model_name)
+            self._graph = create_react_agent(
+                model,
+                tools=self._tools,
+                checkpointer=self._memory,
+                prompt=self.system_prompt,
+            )
 
         config = {"configurable": {"thread_id": context_id}}
 
-        async for event in graph.astream(
+        async for event in self._graph.astream(
             {"messages": [HumanMessage(content=query)]}, config=config
         ):
             if "agent" in event:
