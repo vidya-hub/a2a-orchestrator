@@ -6,35 +6,24 @@ A production-grade demonstration of Google's [Agent-to-Agent (A2A) protocol](htt
 
 ```mermaid
 flowchart TB
-    subgraph Client["External Client"]
-        CLI["a2a-send CLI<br/>--session for memory"]
+    subgraph User["👤 User"]
+        CLI["CLI / Chat Interface"]
+    end
+    subgraph Host["🎯 Host Agent (Routing)"]
+        Router["Routing Agent<br/><i>LangGraph + Claude</i>"]
+    end
+    subgraph Specialists["🔧 Specialist Agents"]
+        Research["Research Agent<br/><i>Web Search via MCP</i>"]
+        Writer["Writer Agent<br/><i>File System via MCP</i>"]
+        More["... More Agents"]
     end
 
-    CLI -->|"A2A Protocol (JSON-RPC/HTTP)<br/>+ context_id"| Routing
-
-    subgraph Routing["Routing Agent :8000"]
-        direction TB
-        Router["Orchestrator (Host Agent)<br/><br/>Tools:<br/>• send_message"]
-        Memory["MemorySaver<br/>(per session)"]
-        Router --- Memory
-    end
-
-    Routing -->|"A2A Protocol"| Research
-    Routing -->|"A2A Protocol"| Writer
-
-    subgraph Research["Research Agent :8001"]
-        direction TB
-        ResearchTools["Tools (MCP only):<br/>• web_search<br/>• fetch_content"]
-        DDG["DuckDuckGo<br/>MCP Server"]
-        ResearchTools --- DDG
-    end
-
-    subgraph Writer["Writer Agent :8002"]
-        direction TB
-        WriterTools["Tools (MCP only):<br/>• read_file<br/>• write_file<br/>• edit_file"]
-        FS["Filesystem<br/>MCP Server"]
-        WriterTools --- FS
-    end
+    CLI -- A2A Request --> Router
+    Router -- A2A Call --> Research & Writer & More
+    Research -- Response --> Router
+    Writer -- Response --> Router
+    More -- Response --> Router
+    Router -- Final Response --> CLI
 ```
 
 ### Key Design Principles
