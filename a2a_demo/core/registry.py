@@ -1,4 +1,4 @@
-"""Agent Registry - Centralized discovery and tracking of A2A agents."""
+"""Agent Registry - A2A agent discovery and communication."""
 
 import asyncio
 import logging
@@ -6,11 +6,13 @@ import uuid
 from dataclasses import dataclass, field
 
 import httpx
-from a2a.client import A2AClient
+from a2a.client import A2ACardResolver, A2AClient
 from a2a.types import (
     AgentCard,
     Message,
     MessageSendParams,
+    Part,
+    Role,
     SendMessageRequest,
     TextPart,
 )
@@ -19,9 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class RegisteredAgent:
-    """An agent registered in the system."""
-
+class RemoteAgentConnection:
     name: str
     url: str
     card: AgentCard
@@ -31,95 +31,77 @@ class RegisteredAgent:
     def __post_init__(self):
         self.skills = [s.name for s in self.card.skills]
 
+    @property
+    def description(self) -> str:
+        skills_str = ", ".join(self.skills) if self.skills else "general"
+        return f"{self.card.description} (Skills: {skills_str})"
+
 
 class AgentRegistry:
-    """
-    Centralized registry for A2A agent discovery and communication.
-
-    This allows agents to discover and communicate with each other
-    via the A2A protocol.
-    """
-
     def __init__(self):
-        self._agents: dict[str, RegisteredAgent] = {}
+        self._agents: dict[str, RemoteAgentConnection] = {}
         self._http_client = httpx.AsyncClient(timeout=120.0)
         self._lock = asyncio.Lock()
 
-    async def register(self, url: str) -> RegisteredAgent | None:
-        """
-        Discover and register an agent at the given URL.
+    async def discover_agent(self, url: str) -> RemoteAgentConnection | None:
+        url = url.rstrip("/")
 
-        Args:
-            url: Base URL of the agent (e.g., http://localhost:8001)
-
-        Returns:
-            RegisteredAgent if successful, None otherwise
-        """
         try:
-            # Fetch agent card
-            card_url = f"{url.rstrip('/')}/.well-known/agent.json"
-            response = await self._http_client.get(card_url)
-            response.raise_for_status()
-            card = AgentCard(**response.json())
+            resolver = A2ACardResolver(
+                httpx_client=self._http_client,
+                base_url=url,
+            )
+            card = await resolver.get_agent_card()
 
-            # Create A2A client
             client = A2AClient(
                 httpx_client=self._http_client,
                 agent_card=card,
-                url=url.rstrip("/"),
+                url=url,
             )
 
-            # Register
             async with self._lock:
-                agent = RegisteredAgent(
+                connection = RemoteAgentConnection(
                     name=card.name,
-                    url=url.rstrip("/"),
+                    url=url,
                     card=card,
                     client=client,
                 )
-                self._agents[card.name] = agent
-                logger.info(f"Registered agent: {card.name} at {url}")
-                logger.info(f"  Skills: {agent.skills}")
-                return agent
+                self._agents[card.name] = connection
+                logger.info(f"Discovered agent: {card.name} at {url}")
+                logger.info(f"  Skills: {connection.skills}")
+                return connection
 
         except Exception as e:
-            logger.error(f"Failed to register agent at {url}: {e}")
+            logger.error(f"Failed to discover agent at {url}: {e}")
             return None
 
-    async def register_many(self, urls: list[str]) -> list[RegisteredAgent]:
-        """Register multiple agents concurrently."""
-        tasks = [self.register(url) for url in urls]
+    async def discover_many(self, urls: list[str]) -> list[RemoteAgentConnection]:
+        tasks = [self.discover_agent(url) for url in urls]
         results = await asyncio.gather(*tasks)
         return [r for r in results if r is not None]
 
-    def get(self, name: str) -> RegisteredAgent | None:
-        """Get a registered agent by name."""
+    register = discover_agent
+    register_many = discover_many
+
+    def get(self, name: str) -> RemoteAgentConnection | None:
         return self._agents.get(name)
 
     def list_agents(self) -> list[str]:
-        """List all registered agent names."""
         return list(self._agents.keys())
 
     def get_agent_descriptions(self) -> dict[str, str]:
-        """Get descriptions of all agents (for LLM routing)."""
-        return {
-            name: f"{agent.card.description} (Skills: {', '.join(agent.skills)})"
-            for name, agent in self._agents.items()
-        }
+        return {name: agent.description for name, agent in self._agents.items()}
 
-    async def send_task(self, agent_name: str, task: str) -> str:
-        """
-        Send a task to an agent via A2A protocol.
+    def get_agents_summary(self) -> str:
+        if not self._agents:
+            return "No remote agents available."
 
-        This is the core A2A communication method.
+        lines = ["Available agents:"]
+        for name, agent in self._agents.items():
+            lines.append(f"  - {name}: {agent.description}")
+        return "\n".join(lines)
 
-        Args:
-            agent_name: Name of the target agent
-            task: Task description to send
-
-        Returns:
-            Response text from the agent
-        """
+    async def send_message(self, agent_name: str, task: str) -> str:
         agent = self._agents.get(agent_name)
         if not agent:
             available = self.list_agents()
@@ -132,19 +114,26 @@ class AgentRegistry:
                 id=str(uuid.uuid4()),
                 params=MessageSendParams(
                     message=Message(
-                        role="user",
-                        parts=[TextPart(text=task)],
-                        messageId=str(uuid.uuid4()),
+                        role=Role.user,
+                        parts=[Part(root=TextPart(text=task))],
+                        message_id=str(uuid.uuid4()),
                     )
                 ),
             )
             response = await agent.client.send_message(request)
 
-            # Extract response text from A2A response structure
             try:
-                result = response.root.result.status.message.parts[0].root.text
-                logger.info(f"A2A ← {agent_name}: {result[:100]}...")
-                return result
+                if hasattr(response.root, "result"):
+                    task_result = response.root.result
+                    if hasattr(task_result, "status") and task_result.status:
+                        msg = task_result.status.message
+                        if msg and msg.parts:
+                            part = msg.parts[0]
+                            if hasattr(part, "root") and hasattr(part.root, "text"):
+                                result = part.root.text
+                                logger.info(f"A2A ← {agent_name}: {result[:100]}...")
+                                return result
+                return str(response)
             except Exception:
                 return str(response)
 
@@ -152,8 +141,9 @@ class AgentRegistry:
             logger.error(f"A2A communication failed with {agent_name}: {e}")
             return f"Error communicating with {agent_name}: {e}"
 
+    send_task = send_message
+
     async def close(self):
-        """Close the registry and all connections."""
         await self._http_client.aclose()
         self._agents.clear()
         logger.info("Agent registry closed")

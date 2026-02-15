@@ -1,35 +1,70 @@
 # A2A Protocol Demo - Agent to Agent Communication
 
-A demonstration of Google's Agent-to-Agent (A2A) protocol with true inter-agent delegation:
-- **Research Agent** (DuckDuckGo MCP) can delegate file operations to Writer Agent
-- **Writer Agent** (Filesystem MCP) can delegate research to Research Agent
-- Both communicate via A2A protocol (JSON-RPC over HTTP)
+A production-grade demonstration of Google's Agent-to-Agent (A2A) protocol implementing the **Host Agent Pattern** — a central orchestrator delegates tasks to specialized agents.
+
+## What's New (v2.0)
+
+This project was refactored to follow [Google's official A2A multi-agent patterns](https://github.com/a2aproject/a2a-samples):
+
+| Before (v1) | After (v2) |
+|-------------|------------|
+| Peer-to-peer delegation | Host agent orchestration |
+| Every agent had `delegate_to_agent` tool | Only RoutingAgent delegates |
+| Specialized agents knew about other agents | Specialized agents are pure domain experts |
+| Delegation logic in system prompts | Clean separation of concerns |
+
+### Why the Change?
+
+The original peer-to-peer approach had issues:
+1. **Coupling**: Every agent needed to know about every other agent
+2. **Confusion**: LLMs often didn't use delegation tools correctly
+3. **Scaling**: Adding new agents required updating all existing agents
+
+The **Host Agent Pattern** (used by Google's official samples) solves these:
+1. **Single orchestrator** (RoutingAgent) handles all routing decisions
+2. **Specialized agents** focus purely on their domain
+3. **Clean interfaces** — agents communicate only through A2A protocol
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        External Client                              │
-│              (curl, httpie, or any HTTP client)                     │
-└─────────────────────────┬───────────────────────────────────────────┘
-                          │ A2A Protocol (JSON-RPC/HTTP)
-          ┌───────────────┴───────────────┐
-          ▼                               ▼
-┌─────────────────────────┐     ┌─────────────────────────┐
-│   Research Agent        │◄───►│   Writer Agent          │
-│   Port: 8001            │ A2A │   Port: 8002            │
-│                         │     │                         │
-│   Tools:                │     │   Tools:                │
-│   - web_search          │     │   - read_file           │
-│   - delegate_to_agent   │     │   - write_file          │
-│   - list_agents         │     │   - edit_file           │
-│                         │     │   - delegate_to_agent   │
-│   ┌───────────────┐     │     │   ┌───────────────┐     │
-│   │ DuckDuckGo    │     │     │   │ Filesystem    │     │
-│   │ MCP Server    │     │     │   │ MCP Server    │     │
-│   └───────────────┘     │     │   └───────────────┘     │
-└─────────────────────────┘     └─────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          External Client                                 │
+│                (curl, httpie, or any HTTP client)                       │
+└─────────────────────────────┬───────────────────────────────────────────┘
+                              │ A2A Protocol (JSON-RPC/HTTP)
+                              ▼
+                    ┌─────────────────────┐
+                    │   Routing Agent     │ ← Orchestrator (Host Agent)
+                    │   Port: 8000        │
+                    │                     │
+                    │   Tools:            │
+                    │   - send_message    │ ← Single delegation tool
+                    └──────────┬──────────┘
+                               │ A2A Protocol
+              ┌────────────────┴────────────────┐
+              ▼                                 ▼
+┌─────────────────────────┐       ┌─────────────────────────┐
+│   Research Agent        │       │   Writer Agent          │
+│   Port: 8001            │       │   Port: 8002            │
+│                         │       │                         │
+│   Tools (MCP only):     │       │   Tools (MCP only):     │
+│   - web_search          │       │   - read_file           │
+│   - fetch_content       │       │   - write_file          │
+│                         │       │   - edit_file           │
+│   ┌───────────────┐     │       │   ┌───────────────┐     │
+│   │ DuckDuckGo    │     │       │   │ Filesystem    │     │
+│   │ MCP Server    │     │       │   │ MCP Server    │     │
+│   └───────────────┘     │       └───────────────────┘     │
+└─────────────────────────┘       └─────────────────────────┘
 ```
+
+### Key Design Principles
+
+1. **RoutingAgent is the only entry point** — Clients send all requests to port 8000
+2. **Specialized agents have NO delegation tools** — They only have their MCP tools
+3. **Agent discovery uses A2A protocol** — `/.well-known/agent-card.json` endpoints
+4. **Communication uses official SDK** — `A2ACardResolver` and `A2AClient`
 
 ## Setup
 
@@ -49,24 +84,27 @@ echo "GOOGLE_API_KEY=your-key-here" > .env
 
 ## Quick Start
 
-### 1. Start the Servers
+### 1. Start All Agents
 
 ```bash
 python run.py run --output-dir ./output
 ```
 
 This starts:
-- **Research Agent** on `http://localhost:8001`
-- **Writer Agent** on `http://localhost:8002`
-- Output directory at `./output` for file operations
+- **Routing Agent** on `http://localhost:8000` (orchestrator - send all requests here)
+- **Research Agent** on `http://localhost:8001` (web search capabilities)
+- **Writer Agent** on `http://localhost:8002` (file operations)
 
 ### 2. Send a Request
 
-In another terminal, send a task using curl:
+All requests go to the **Routing Agent** (port 8000):
 
 ```bash
-# Search and save to file (demonstrates A2A delegation)
-curl -X POST http://localhost:8001/ \
+# Using the CLI helper
+python run.py send "Search for Python 3.13 features and save a summary to /full/path/to/output/python_features.txt" --port 8000
+
+# Or using curl directly
+curl -X POST http://localhost:8000/ \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -88,13 +126,36 @@ curl -X POST http://localhost:8001/ \
 cat ./output/python_features.txt
 ```
 
+## How It Works
+
+### Request Flow
+
+```
+User Request → RoutingAgent → Analyzes task
+                    │
+                    ├─→ "Need web search" → Research Agent → Results
+                    │
+                    └─→ "Need file write" → Writer Agent → Success
+                    │
+                    └─→ Response to user
+```
+
+### Example: "Search for X and save to file"
+
+1. **User** sends request to RoutingAgent (port 8000)
+2. **RoutingAgent** analyzes: needs search AND file write
+3. **RoutingAgent** calls `send_message("Research Agent", "search for X")`
+4. **Research Agent** executes web search, returns results
+5. **RoutingAgent** calls `send_message("Writer Agent", "save this to file")`
+6. **Writer Agent** writes file, returns confirmation
+7. **RoutingAgent** compiles final response to user
+
 ## API Reference
 
-### Send Message to Agent
+### Send Message to Routing Agent
 
-**Endpoint:** `POST http://localhost:{port}/`
+**Endpoint:** `POST http://localhost:8000/`
 
-**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -131,328 +192,269 @@ cat ./output/python_features.txt
 ### Get Agent Card (Discovery)
 
 ```bash
-# Agent metadata and capabilities
+# Routing Agent
+curl http://localhost:8000/.well-known/agent-card.json
+
+# Research Agent  
 curl http://localhost:8001/.well-known/agent-card.json
+
+# Writer Agent
+curl http://localhost:8002/.well-known/agent-card.json
 ```
 
 ## Example Tasks
 
-### Research Agent (port 8001)
-```bash
-# Simple search
-curl -X POST http://localhost:8001/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "method": "message/send", "id": "1",
-    "params": {"message": {"messageId": "m1", "role": "user", 
-      "parts": [{"kind": "text", "text": "Search for latest AI news"}]}}
-  }'
+### Multi-Agent Tasks (via Routing Agent - Port 8000)
 
-# Search + delegate file save to Writer Agent
-curl -X POST http://localhost:8001/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "method": "message/send", "id": "2",
-    "params": {"message": {"messageId": "m2", "role": "user", 
-      "parts": [{"kind": "text", "text": "Search for Rust programming tips and save them to rust_tips.txt"}]}}
-  }'
+```bash
+# Search and save to file
+python run.py send "Search for latest AI news and save a summary to ai_news.txt" --port 8000
+
+# Research and document
+python run.py send "Find Docker best practices and write them to docker_tips.txt" --port 8000
+
+# Complex task with multiple agents
+python run.py send "Search for Python asyncio tutorials, summarize the key points, and save to asyncio_guide.txt" --port 8000
 ```
 
-### Writer Agent (port 8002)
+### Direct Agent Access (for testing only)
+
+You can access specialized agents directly, but they won't delegate:
+
 ```bash
-# Write a file
-curl -X POST http://localhost:8002/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "method": "message/send", "id": "1",
-    "params": {"message": {"messageId": "m1", "role": "user", 
-      "parts": [{"kind": "text", "text": "Write hello world to hello.txt"}]}}
-  }'
+# Research Agent directly (web search only)
+python run.py send "Search for Rust programming tips" --port 8001
 
-# Read a file
-curl -X POST http://localhost:8002/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "method": "message/send", "id": "2",
-    "params": {"message": {"messageId": "m2", "role": "user", 
-      "parts": [{"kind": "text", "text": "Read the contents of hello.txt"}]}}
-  }'
-
-# Research + write (delegates to Research Agent)
-curl -X POST http://localhost:8002/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "method": "message/send", "id": "3",
-    "params": {"message": {"messageId": "m3", "role": "user", 
-      "parts": [{"kind": "text", "text": "Find information about Docker best practices and write it to docker_tips.txt"}]}}
-  }'
+# Writer Agent directly (file operations only)
+python run.py send "Write 'Hello World' to hello.txt" --port 8002
 ```
 
-## CLI Options
+**Note:** Direct access bypasses orchestration — always use port 8000 for real tasks.
+
+## CLI Reference
 
 ```bash
-# Run with custom ports
+# Start all agents
+python run.py run --output-dir ./output
+
+# Send a message to Routing Agent
+python run.py send "Your task" --port 8000
+
+# Custom configuration
 python run.py run \
   --host 0.0.0.0 \
-  --research-port 9001 \
-  --writer-port 9002 \
-  --output-dir /tmp/a2a-output
-
-# Use custom MCP servers
-python run.py run \
-  --research-mcp "uvx ddgs-mcp" \
-  --writer-mcp "npx -y @modelcontextprotocol/server-filesystem /custom/path"
+  --routing-port 8000 \
+  --research-port 8001 \
+  --writer-port 8002 \
+  --output-dir /custom/path
 ```
 
 ## Project Structure
 
 ```
 a2a-demo/
-├── run.py                  # Main entry point
-├── pyproject.toml          # Dependencies
-├── .env                    # GOOGLE_API_KEY
-├── output/                 # Writer Agent file operations
+├── run.py                      # Main entry point
+├── pyproject.toml              # Dependencies
+├── .env                        # GOOGLE_API_KEY
+├── output/                     # Writer Agent output directory
 └── a2a_demo/
     ├── __init__.py
     ├── core/
-    │   └── registry.py     # A2A agent discovery & routing
+    │   └── registry.py         # A2ACardResolver + A2AClient wrapper
     ├── mcp/
-    │   └── manager.py      # Persistent MCP connections
+    │   └── manager.py          # Persistent MCP connections
     └── agents/
-        ├── base.py         # Base agent with delegation tools
-        ├── research.py     # Research Agent (DuckDuckGo)
-        └── writer.py       # Writer Agent (Filesystem)
+        ├── __init__.py
+        ├── base.py             # BaseAgent (MCP tools only, no delegation)
+        ├── routing.py          # RoutingAgent (orchestrator with send_message)
+        ├── research.py         # ResearchAgent (DuckDuckGo MCP)
+        └── writer.py           # WriterAgent (Filesystem MCP)
 ```
 
-## How It Works Under the Hood
+## Technical Details
+
+### Agent Discovery (A2A Protocol)
+
+The RoutingAgent discovers specialized agents using the official `A2ACardResolver`:
+
+```python
+from a2a.client import A2ACardResolver
+
+resolver = A2ACardResolver()
+card = await resolver.get_agent_card("http://localhost:8001")
+# Returns: AgentCard with name, description, skills, url
+```
+
+### Inter-Agent Communication
+
+The RoutingAgent communicates with specialized agents using `A2AClient`:
+
+```python
+from a2a.client import A2AClient
+
+client = A2AClient(httpx.AsyncClient(), agent_card)
+response = await client.send_message(
+    message=Message(
+        messageId="msg-001",
+        role="user",
+        parts=[Part(kind="text", text="Your task")]
+    )
+)
+```
+
+### RoutingAgent's send_message Tool
+
+The RoutingAgent has a single tool for delegation:
+
+```python
+@tool
+async def send_message(agent_name: str, task: str) -> str:
+    """Send a task to another agent via A2A protocol.
+    
+    Args:
+        agent_name: Name of the agent (e.g., "Research Agent", "Writer Agent")
+        task: The task description to send
+    
+    Returns:
+        The agent's response
+    """
+```
+
+## Sequence Diagrams
 
 ### Startup Sequence
 
 ```mermaid
 sequenceDiagram
     participant Main as run.py
-    participant RA as Research Agent
+    participant RA as Routing Agent
+    participant ResA as Research Agent
     participant WA as Writer Agent
-    participant DDG as DuckDuckGo MCP
-    participant FS as Filesystem MCP
-    participant Reg as Agent Registry
 
-    Note over Main: Phase 1: Setup MCP Connections
-    Main->>RA: Create Research Agent
-    RA->>DDG: Connect (stdio)
-    DDG-->>RA: Tools: web_search, news_search
-    Main->>WA: Create Writer Agent
-    WA->>FS: Connect (stdio)
-    FS-->>WA: Tools: read_file, write_file, edit_file...
+    Note over Main: Phase 1: Start Specialized Agents
+    Main->>ResA: Start on :8001 (with DuckDuckGo MCP)
+    Main->>WA: Start on :8002 (with Filesystem MCP)
 
-    Note over Main: Phase 2: Start A2A Servers
-    Main->>RA: Start server on :8001
-    Main->>WA: Start server on :8002
+    Note over Main: Phase 2: Start Routing Agent
+    Main->>RA: Start on :8000
 
-    Note over Main: Phase 3: Peer Discovery
-    Main->>Reg: Register http://localhost:8001
-    Reg->>RA: GET /.well-known/agent-card.json
-    RA-->>Reg: AgentCard (name, skills, url)
-    Main->>Reg: Register http://localhost:8002
-    Reg->>WA: GET /.well-known/agent-card.json
-    WA-->>Reg: AgentCard (name, skills, url)
+    Note over Main: Phase 3: Agent Discovery
+    RA->>ResA: GET /.well-known/agent-card.json
+    ResA-->>RA: AgentCard (name, skills, url)
+    RA->>WA: GET /.well-known/agent-card.json
+    WA-->>RA: AgentCard (name, skills, url)
 
-    Note over Reg: Agents can now discover & delegate to each other
+    Note over RA: RoutingAgent now knows all available agents
 ```
 
-### Simple Request Flow (No Delegation)
+### Multi-Agent Task Flow
 
 ```mermaid
 sequenceDiagram
-    participant Client as curl/HTTP Client
-    participant RA as Research Agent<br/>:8001
+    participant Client as HTTP Client
+    participant RA as Routing Agent<br/>:8000
     participant LLM as Gemini LLM
-    participant DDG as DuckDuckGo MCP
+    participant ResA as Research Agent<br/>:8001
+    participant WA as Writer Agent<br/>:8002
 
-    Client->>RA: POST / (message/send)<br/>"Search for AI news"
-    RA->>LLM: Process with tools
-    LLM-->>RA: Call tool: web_search("AI news")
-    RA->>DDG: call_tool("web_search", {query: "AI news"})
-    DDG-->>RA: Search results
-    RA->>LLM: Tool result
+    Client->>RA: "Search for AI news and save to file"
+    
+    RA->>LLM: Process with send_message tool
+    LLM-->>RA: Call send_message("Research Agent", "search AI news")
+    
+    RA->>ResA: A2A message/send
+    ResA-->>RA: Search results
+    
+    LLM-->>RA: Call send_message("Writer Agent", "save results to file")
+    
+    RA->>WA: A2A message/send
+    WA-->>RA: "File saved successfully"
+    
     LLM-->>RA: Final response
-    RA-->>Client: JSON-RPC Response<br/>"Found 10 results about AI..."
+    RA-->>Client: "Found AI news and saved to file"
 ```
 
-### A2A Delegation Flow (Research → Writer)
+## Architecture Comparison
 
-```mermaid
-sequenceDiagram
-    participant Client as curl/HTTP Client
-    participant RA as Research Agent<br/>:8001
-    participant LLM1 as Gemini (Research)
-    participant DDG as DuckDuckGo MCP
-    participant Reg as Agent Registry
-    participant WA as Writer Agent<br/>:8002
-    participant LLM2 as Gemini (Writer)
-    participant FS as Filesystem MCP
+### Old (v1): Peer-to-Peer Delegation
 
-    Client->>RA: POST / (message/send)<br/>"Search Python 3.13 features<br/>and save to features.txt"
-    
-    Note over RA,LLM1: Step 1: Research
-    RA->>LLM1: Process with tools
-    LLM1-->>RA: Call tool: web_search
-    RA->>DDG: web_search("Python 3.13 features")
-    DDG-->>RA: Search results
-    RA->>LLM1: Tool result
-
-    Note over RA,WA: Step 2: A2A Delegation
-    LLM1-->>RA: Call tool: delegate_to_agent<br/>("Writer Agent", "Save to features.txt...")
-    RA->>Reg: Get Writer Agent URL
-    Reg-->>RA: http://localhost:8002
-    
-    RA->>WA: POST / (message/send)<br/>"Save the following to features.txt..."
-    
-    Note over WA,FS: Step 3: File Write
-    WA->>LLM2: Process with tools
-    LLM2-->>WA: Call tool: write_file
-    WA->>FS: write_file("features.txt", content)
-    FS-->>WA: Success
-    WA->>LLM2: Tool result
-    LLM2-->>WA: "File saved successfully"
-    
-    WA-->>RA: A2A Response<br/>"File saved successfully"
-    
-    Note over RA,Client: Step 4: Return to User
-    RA->>LLM1: Delegation result
-    LLM1-->>RA: Final response
-    RA-->>Client: JSON-RPC Response<br/>"Searched and saved to features.txt"
+```
+┌─────────────┐     delegate     ┌─────────────┐
+│  Research   │◄────────────────►│   Writer    │
+│   Agent     │                  │   Agent     │
+│             │                  │             │
+│  Tools:     │                  │  Tools:     │
+│  - search   │                  │  - read     │
+│  - delegate │                  │  - write    │
+│  - list     │                  │  - delegate │
+└─────────────┘                  └─────────────┘
+     ▲                                ▲
+     │         Direct access          │
+     └────────────────────────────────┘
+                   User
 ```
 
-### Bidirectional Delegation (Writer → Research)
+**Problems:**
+- Every agent needed delegation logic
+- Agents had to know about each other
+- LLM often failed to use delegation correctly
+- Hard to add new agents
 
-```mermaid
-sequenceDiagram
-    participant Client as curl/HTTP Client
-    participant WA as Writer Agent<br/>:8002
-    participant LLM2 as Gemini (Writer)
-    participant Reg as Agent Registry
-    participant RA as Research Agent<br/>:8001
-    participant LLM1 as Gemini (Research)
-    participant DDG as DuckDuckGo MCP
-    participant FS as Filesystem MCP
+### New (v2): Host Agent Pattern
 
-    Client->>WA: POST / (message/send)<br/>"Find Docker tips and<br/>write to docker.txt"
-    
-    Note over WA,RA: Step 1: Delegate Research
-    WA->>LLM2: Process with tools
-    LLM2-->>WA: Call tool: delegate_to_agent<br/>("Research Agent", "Find Docker tips")
-    WA->>Reg: Get Research Agent URL
-    Reg-->>WA: http://localhost:8001
-    
-    WA->>RA: POST / (message/send)<br/>"Find Docker best practices"
-    RA->>LLM1: Process with tools
-    LLM1-->>RA: Call tool: web_search
-    RA->>DDG: web_search("Docker best practices")
-    DDG-->>RA: Search results
-    RA->>LLM1: Tool result
-    LLM1-->>RA: "Docker tips: 1. Use multi-stage..."
-    RA-->>WA: A2A Response with Docker tips
-    
-    Note over WA,FS: Step 2: Write File
-    WA->>LLM2: Research result
-    LLM2-->>WA: Call tool: write_file
-    WA->>FS: write_file("docker.txt", tips)
-    FS-->>WA: Success
-    WA->>LLM2: Tool result
-    LLM2-->>WA: Final response
-    
-    WA-->>Client: JSON-RPC Response<br/>"Wrote Docker tips to docker.txt"
+```
+                    ┌─────────────┐
+                    │   Routing   │ ← Single entry point
+                    │   Agent     │
+                    │             │
+                    │  Tools:     │
+                    │  - send_msg │
+                    └──────┬──────┘
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+       ┌─────────────┐          ┌─────────────┐
+       │  Research   │          │   Writer    │
+       │   Agent     │          │   Agent     │
+       │             │          │             │
+       │  Tools:     │          │  Tools:     │
+       │  - search   │          │  - read     │
+       │  (MCP only) │          │  - write    │
+       └─────────────┘          └─────────────┘
 ```
 
-### Component Architecture
+**Benefits:**
+- Clear separation of concerns
+- Specialized agents stay focused
+- Easy to add new agents
+- RoutingAgent handles all orchestration
 
-```mermaid
-flowchart TB
-    subgraph Client["External Client"]
-        curl[curl / HTTP Client]
-    end
+## Troubleshooting
 
-    subgraph A2A["A2A Layer"]
-        subgraph RA["Research Agent :8001"]
-            RA_Server[A2A Server<br/>Starlette + JSONRPC]
-            RA_Executor[Agent Executor]
-            RA_Agent[LangGraph ReAct Agent]
-            RA_Tools[Tools]
-            RA_Server --> RA_Executor --> RA_Agent --> RA_Tools
-        end
+### "Agent not found" Error
 
-        subgraph WA["Writer Agent :8002"]
-            WA_Server[A2A Server<br/>Starlette + JSONRPC]
-            WA_Executor[Agent Executor]
-            WA_Agent[LangGraph ReAct Agent]
-            WA_Tools[Tools]
-            WA_Server --> WA_Executor --> WA_Agent --> WA_Tools
-        end
-
-        Registry[(Agent Registry<br/>URL → AgentCard)]
-    end
-
-    subgraph MCP["MCP Layer"]
-        MCPMgr[MCP Manager<br/>Connection Pool]
-        DDG[DuckDuckGo MCP<br/>stdio process]
-        FS[Filesystem MCP<br/>stdio process]
-    end
-
-    subgraph LLM["LLM Layer"]
-        Gemini[Google Gemini API]
-    end
-
-    curl -->|JSON-RPC| RA_Server
-    curl -->|JSON-RPC| WA_Server
-    
-    RA_Tools -->|delegate_to_agent| Registry
-    WA_Tools -->|delegate_to_agent| Registry
-    Registry -.->|A2A call| WA_Server
-    Registry -.->|A2A call| RA_Server
-
-    RA_Tools -->|MCP call| MCPMgr
-    WA_Tools -->|MCP call| MCPMgr
-    MCPMgr --> DDG
-    MCPMgr --> FS
-
-    RA_Agent -->|generate| Gemini
-    WA_Agent -->|generate| Gemini
+Make sure specialized agents are fully started before RoutingAgent discovers them:
+```bash
+# Check agent cards are accessible
+curl http://localhost:8001/.well-known/agent-card.json
+curl http://localhost:8002/.well-known/agent-card.json
 ```
 
-### Tool Resolution Flow
+### File Write Fails
 
-```mermaid
-flowchart LR
-    subgraph Agent["Agent Tool Selection"]
-        Query[User Query] --> LLM[Gemini LLM]
-        LLM --> Decision{Which tool?}
-    end
+Writer Agent requires **full paths** within the allowed directory:
+```bash
+# Wrong (relative path)
+"save to notes.txt"
 
-    subgraph MCP_Tools["MCP Tools"]
-        Decision -->|search needed| Search[web_search<br/>news_search]
-        Decision -->|file needed| File[read_file<br/>write_file<br/>edit_file]
-    end
-
-    subgraph A2A_Tools["A2A Tools"]
-        Decision -->|need other agent| Delegate[delegate_to_agent]
-        Decision -->|discover agents| List[list_available_agents]
-    end
-
-    Search --> DDG[(DuckDuckGo<br/>MCP Server)]
-    File --> FS[(Filesystem<br/>MCP Server)]
-    Delegate --> Registry[(Agent<br/>Registry)]
-    List --> Registry
-
-    Registry -->|HTTP POST| OtherAgent[Other A2A Agent]
+# Right (full path)
+"save to /Users/you/a2a-demo/output/notes.txt"
 ```
 
-### Data Flow Summary
+### Agent Doesn't Delegate
 
-| Step | Component | Protocol | Description |
-|------|-----------|----------|-------------|
-| 1 | Client → Agent | HTTP/JSON-RPC | A2A `message/send` request |
-| 2 | Agent → LLM | HTTPS | Gemini API call with tools |
-| 3 | Agent → MCP | stdio/JSON-RPC | Tool execution (search/file) |
-| 4 | Agent → Agent | HTTP/JSON-RPC | A2A delegation via Registry |
-| 5 | Agent → Client | HTTP/JSON-RPC | A2A response with result |
+If using specialized agents directly (not via RoutingAgent), they won't delegate to other agents — they only have their MCP tools. Always send complex multi-step tasks to the **Routing Agent** (port 8000).
+
+## License
+
+MIT
